@@ -1,38 +1,190 @@
-.App {
-    text-align: center;
+/* App.css */
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+/* Custom scrollbar for webkit browsers */
+::-webkit-scrollbar {
+  width: 8px;
 }
 
-.App-logo {
-    height: 40vmin;
-    pointer-events: none;
+::-webkit-scrollbar-track {
+  @apply bg-gray-800;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
+::-webkit-scrollbar-thumb {
+  @apply bg-cyan-500/50 rounded-full;
 }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-cyan-500/70;
 }
 
-.App-link {
-    color: #61dafb;
+/* Hologram effect animations */
+@keyframes hologram-flicker {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
 }
 
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
+@keyframes hologram-glow {
+  0%, 100% { 
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.3);
+  }
+  50% { 
+    box-shadow: 0 0 40px rgba(34, 211, 238, 0.6);
+  }
+}
+
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+/* Custom input styles */
+input[type="range"] {
+  @apply h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  @apply appearance-none w-4 h-4 bg-cyan-500 rounded-full cursor-pointer;
+}
+
+input[type="range"]::-moz-range-thumb {
+  @apply w-4 h-4 bg-cyan-500 rounded-full cursor-pointer border-0;
+}
+
+/* Hologram preview styles */
+.hologram-preview {
+  position: relative;
+  filter: hue-rotate(200deg) saturate(2) brightness(1.2);
+  animation: hologram-flicker 2s infinite alternate;
+}
+
+.hologram-preview::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(
+    transparent 48%,
+    rgba(0, 255, 255, 0.1) 49%,
+    rgba(0, 255, 255, 0.1) 50%,
+    transparent 52%
+  );
+  background-size: 100% 4px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.hologram-preview::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: radial-gradient(
+    circle at center,
+    transparent 30%,
+    rgba(0, 255, 255, 0.1) 70%
+  );
+  pointer-events: none;
+  z-index: 2;
+  animation: hologram-glow 3s infinite alternate;
+}
+
+/* Loading animation */
+.processing-indicator {
+  background: linear-gradient(45deg, #0891b2, #06b6d4, #22d3ee, #67e8f9);
+  background-size: 400% 400%;
+  animation: gradient-shift 3s ease infinite;
+}
+
+@keyframes gradient-shift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* Futuristic button styles */
+.futuristic-button {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(45deg, #0891b2, #06b6d4);
+  border: 1px solid #22d3ee;
+  transition: all 0.3s ease;
+}
+
+.futuristic-button::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  transition: left 0.5s;
+}
+
+.futuristic-button:hover::before {
+  left: 100%;
+}
+
+.futuristic-button:hover {
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.5);
+  transform: translateY(-1px);
+}
+
+/* Video preview enhancements */
+video {
+  border: 1px solid rgba(34, 211, 238, 0.3);
+}
+
+video:hover {
+  border-color: rgba(34, 211, 238, 0.6);
+  box-shadow: 0 4px 20px rgba(34, 211, 238, 0.2);
+}
+
+/* File upload area animations */
+.upload-area {
+  transition: all 0.3s ease;
+}
+
+.upload-area:hover {
+  background-color: rgba(34, 211, 238, 0.05);
+  transform: scale(1.01);
+}
+
+/* Status indicators */
+.status-completed {
+  @apply text-green-400;
+  text-shadow: 0 0 10px rgba(34, 197, 94, 0.5);
+}
+
+.status-processing {
+  @apply text-yellow-400;
+  text-shadow: 0 0 10px rgba(251, 191, 36, 0.5);
+  animation: pulse 2s infinite;
+}
+
+.status-failed {
+  @apply text-red-400;
+  text-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .grid-cols-1.lg\:grid-cols-2 {
+    grid-template-columns: 1fr;
+  }
+  
+  .text-4xl {
+    @apply text-2xl;
+  }
+  
+  .text-2xl {
+    @apply text-xl;
+  }
 }
