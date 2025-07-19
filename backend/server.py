@@ -157,7 +157,7 @@ async def process_hologram_video(project_id: str, base_video_path: str, hologram
         
         # Add flicker effect
         if settings.flicker_intensity > 0:
-            flicker_expr = f"'if(mod(n,3),{1-settings.flicker_intensity},1)'"
+            flicker_expr = f"if(mod(n,3),{1-settings.flicker_intensity},1)"
             filter_complex.append(f"[{last_filter}]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='a(X,Y)*{flicker_expr}'[flickered]")
             last_filter = "flickered"
         
