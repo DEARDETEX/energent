@@ -8,8 +8,12 @@ const API = `${BACKEND_URL}/api`;
 function App() {
   const [project, setProject] = useState(null);
   const [baseVideoFile, setBaseVideoFile] = useState(null);
+  const [baseVideoInfo, setBaseVideoInfo] = useState(null);
   const [hologramFile, setHologramFile] = useState(null);
+  const [hologramInfo, setHologramInfo] = useState(null);
   const [processing, setProcessing] = useState(false);
+  const [uploadingBase, setUploadingBase] = useState(false);
+  const [uploadingHologram, setUploadingHologram] = useState(false);
   const [settings, setSettings] = useState({
     hologram_size: 0.3,
     hologram_position_x: 0.5,
@@ -22,69 +26,148 @@ function App() {
     transparency: 0.7
   });
   const [status, setStatus] = useState(null);
-  const [ffmpegAvailable, setFfmpegAvailable] = useState(false);
+  const [systemStatus, setSystemStatus] = useState(null);
+  const [errors, setErrors] = useState([]);
   
   const baseVideoRef = useRef(null);
   const hologramPreviewRef = useRef(null);
 
   useEffect(() => {
-    checkBackendStatus();
+    checkSystemStatus();
   }, []);
 
-  const checkBackendStatus = async () => {
+  const addError = (message) => {
+    setErrors(prev => [...prev.slice(-4), { id: Date.now(), message }]);
+    setTimeout(() => {
+      setErrors(prev => prev.filter(err => err.id !== Date.now()));
+    }, 5000);
+  };
+
+  const checkSystemStatus = async () => {
     try {
       const response = await axios.get(`${API}/`);
-      setFfmpegAvailable(response.data.ffmpeg_available);
+      setSystemStatus(response.data);
     } catch (error) {
       console.error('Backend not available:', error);
+      addError('Backend connection failed. Please refresh the page.');
     }
+  };
+
+  const formatFileSize = (bytes) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
   const createProject = async () => {
     try {
       const formData = new FormData();
-      formData.append('name', `Hologram Project ${Date.now()}`);
+      formData.append('name', `Hologram Project ${new Date().toLocaleDateString()}`);
       
       const response = await axios.post(`${API}/projects`, formData);
       setProject(response.data);
+      return response.data;
     } catch (error) {
       console.error('Error creating project:', error);
+      addError('Failed to create project. Please try again.');
+      return null;
     }
   };
 
-  const uploadBaseVideo = async (file) => {
-    if (!project) return;
+  const uploadBaseVideo = async (file, projectId = null) => {
+    const targetProject = projectId || project;
+    if (!targetProject) return;
     
     try {
+      setUploadingBase(true);
       const formData = new FormData();
       formData.append('file', file);
       
-      await axios.post(`${API}/projects/${project.id}/upload-base-video`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
+      const response = await axios.post(
+        `${API}/projects/${targetProject.id}/upload-base-video`,
+        formData,
+        {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          onUploadProgress: (progressEvent) => {
+            const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            console.log(`Base video upload progress: ${percentCompleted}%`);
+          }
+        }
+      );
       
       setBaseVideoFile(file);
+      setBaseVideoInfo(response.data);
+      
+      // Create video preview
+      if (baseVideoRef.current) {
+        baseVideoRef.current.src = URL.createObjectURL(file);
+      }
+      
     } catch (error) {
       console.error('Error uploading base video:', error);
+      if (error.response?.status === 400) {
+        addError(error.response.data.detail || 'Invalid video file. Please upload MP4, MOV, or AVI files only.');
+      } else {
+        addError('Failed to upload base video. Please try again.');
+      }
+    } finally {
+      setUploadingBase(false);
     }
   };
 
-  const uploadHologramMedia = async (file) => {
-    if (!project) return;
+  const uploadHologramMedia = async (file, projectId = null) => {
+    const targetProject = projectId || project;
+    if (!targetProject) return;
     
     try {
+      setUploadingHologram(true);
       const formData = new FormData();
       formData.append('file', file);
       
-      await axios.post(`${API}/projects/${project.id}/upload-hologram-media`, formData);
+      const response = await axios.post(
+        `${API}/projects/${targetProject.id}/upload-hologram-media`,
+        formData,
+        {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          onUploadProgress: (progressEvent) => {
+            const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            console.log(`Hologram media upload progress: ${percentCompleted}%`);
+          }
+        }
+      );
+      
       setHologramFile(file);
+      setHologramInfo(response.data);
+      
+      // Create preview
+      if (file.type.startsWith('image/')) {
+        const imgUrl = URL.createObjectURL(file);
+        console.log('Created image preview:', imgUrl);
+      } else if (file.type.startsWith('video/') && hologramPreviewRef.current) {
+        hologramPreviewRef.current.src = URL.createObjectURL(file);
+      }
+      
     } catch (error) {
       console.error('Error uploading hologram media:', error);
+      if (error.response?.status === 400) {
+        addError(error.response.data.detail || 'Invalid file. Please upload images (PNG, JPG) or videos (MP4, MOV).');
+      } else {
+        addError('Failed to upload hologram media. Please try again.');
+      }
+    } finally {
+      setUploadingHologram(false);
     }
   };
 
   const processVideo = async () => {
     if (!project || !baseVideoFile || !hologramFile) return;
+    
+    if (!systemStatus?.ffmpeg_available) {
+      addError('FFmpeg is not available. Cannot process video.');
+      return;
+    }
     
     try {
       setProcessing(true);
@@ -100,10 +183,14 @@ function App() {
             setTimeout(pollStatus, 2000);
           } else {
             setProcessing(false);
+            if (response.data.status === 'failed') {
+              addError(`Processing failed: ${response.data.error_message || 'Unknown error'}`);
+            }
           }
         } catch (error) {
           console.error('Error checking status:', error);
           setProcessing(false);
+          addError('Error checking processing status');
         }
       };
       
@@ -111,6 +198,11 @@ function App() {
     } catch (error) {
       console.error('Error processing video:', error);
       setProcessing(false);
+      if (error.response?.status === 503) {
+        addError('Video processing service unavailable. Please try again later.');
+      } else {
+        addError('Failed to start video processing. Please check your files and try again.');
+      }
     }
   };
 
@@ -125,40 +217,79 @@ function App() {
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.download = `hologram_${project.id}.mp4`;
+      
+      // Get filename from response headers or use default
+      const contentDisposition = response.headers['content-disposition'];
+      let filename = `hologram_${project.id}.mp4`;
+      
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      }
+      
+      link.download = filename;
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.URL.revokeObjectURL(url);
     } catch (error) {
       console.error('Error downloading video:', error);
+      addError('Failed to download video. Please try again.');
     }
   };
 
-  const handleBaseVideoChange = (e) => {
+  const handleBaseVideoChange = async (e) => {
     const file = e.target.files[0];
     if (file) {
-      if (!project) {
-        createProject().then(() => uploadBaseVideo(file));
-      } else {
-        uploadBaseVideo(file);
+      // Validate file size (100MB limit)
+      if (file.size > 100 * 1024 * 1024) {
+        addError('Video file too large. Maximum size is 100MB.');
+        return;
       }
+      
+      let targetProject = project;
+      if (!targetProject) {
+        targetProject = await createProject();
+        if (!targetProject) return;
+      }
+      
+      await uploadBaseVideo(file, targetProject);
     }
   };
 
-  const handleHologramFileChange = (e) => {
+  const handleHologramFileChange = async (e) => {
     const file = e.target.files[0];
     if (file) {
-      if (!project) {
-        createProject().then(() => uploadHologramMedia(file));
-      } else {
-        uploadHologramMedia(file);
+      // Validate file size (50MB limit)
+      if (file.size > 50 * 1024 * 1024) {
+        addError('Media file too large. Maximum size is 50MB.');
+        return;
       }
+      
+      let targetProject = project;
+      if (!targetProject) {
+        targetProject = await createProject();
+        if (!targetProject) return;
+      }
+      
+      await uploadHologramMedia(file, targetProject);
     }
   };
 
   const updateSetting = (key, value) => {
     setSettings(prev => ({ ...prev, [key]: value }));
+  };
+
+  const resetProject = () => {
+    setProject(null);
+    setBaseVideoFile(null);
+    setBaseVideoInfo(null);
+    setHologramFile(null);
+    setHologramInfo(null);
+    setStatus(null);
+    setProcessing(false);
   };
 
   return (
@@ -171,9 +302,37 @@ function App() {
           </h1>
           <p className="text-gray-300 mt-2">Create stunning holographic effects for your videos</p>
           
-          {!ffmpegAvailable && (
-            <div className="mt-4 p-4 bg-red-500/20 border border-red-500/50 rounded-lg">
-              <p className="text-red-300">⚠️ FFmpeg not detected. Video processing may not work properly.</p>
+          {/* System Status */}
+          {systemStatus && (
+            <div className="mt-4">
+              {!systemStatus.ffmpeg_available ? (
+                <div className="p-4 bg-red-500/20 border border-red-500/50 rounded-lg">
+                  <p className="text-red-300">⚠️ FFmpeg not detected. Video processing may not work properly.</p>
+                  <button 
+                    onClick={checkSystemStatus}
+                    className="mt-2 px-3 py-1 bg-red-500/30 text-red-200 rounded hover:bg-red-500/50 transition-colors text-sm"
+                  >
+                    Retry Check
+                  </button>
+                </div>
+              ) : (
+                <div className="p-3 bg-green-500/20 border border-green-500/50 rounded-lg">
+                  <p className="text-green-300 text-sm">
+                    ✅ System Ready - FFmpeg {systemStatus.ffmpeg_version} | {systemStatus.total_projects} projects created
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Error Messages */}
+          {errors.length > 0 && (
+            <div className="mt-4 space-y-2">
+              {errors.map((error) => (
+                <div key={error.id} className="p-3 bg-red-500/20 border border-red-500/50 rounded-lg">
+                  <p className="text-red-300 text-sm">❌ {error.message}</p>
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -197,28 +356,57 @@ function App() {
                     onChange={handleBaseVideoChange}
                     className="hidden"
                     id="base-video-upload"
+                    disabled={uploadingBase}
                   />
                   <label
                     htmlFor="base-video-upload"
-                    className="flex items-center justify-center w-full h-32 border-2 border-dashed border-cyan-500/50 rounded-lg hover:border-cyan-400/80 cursor-pointer transition-colors bg-gray-800/30"
+                    className={`flex items-center justify-center w-full h-32 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
+                      uploadingBase 
+                        ? 'border-yellow-500/50 bg-yellow-500/10' 
+                        : baseVideoFile 
+                          ? 'border-green-500/50 bg-green-500/10 hover:border-green-400/80' 
+                          : 'border-cyan-500/50 bg-gray-800/30 hover:border-cyan-400/80'
+                    }`}
                   >
                     <div className="text-center">
-                      <div className="text-4xl mb-2">🎬</div>
+                      <div className="text-4xl mb-2">
+                        {uploadingBase ? '⏳' : baseVideoFile ? '✅' : '🎬'}
+                      </div>
                       <p className="text-gray-300">
-                        {baseVideoFile ? baseVideoFile.name : "Drop your base video here"}
+                        {uploadingBase 
+                          ? 'Uploading base video...' 
+                          : baseVideoFile 
+                            ? baseVideoInfo?.filename || baseVideoFile.name
+                            : "Drop your base video here"
+                        }
                       </p>
-                      <p className="text-sm text-gray-500">MP4, MOV, AVI supported</p>
+                      <p className="text-sm text-gray-500">
+                        {uploadingBase 
+                          ? 'Please wait...' 
+                          : baseVideoInfo 
+                            ? `${baseVideoInfo.size} uploaded` 
+                            : 'MP4, MOV, AVI supported (max 100MB)'
+                        }
+                      </p>
                     </div>
                   </label>
                 </div>
                 
-                {baseVideoFile && (
+                {baseVideoFile && !uploadingBase && (
                   <div className="mt-3">
                     <video
                       ref={baseVideoRef}
-                      src={URL.createObjectURL(baseVideoFile)}
                       controls
-                      className="w-full max-h-40 rounded-lg"
+                      className="w-full max-h-40 rounded-lg border border-cyan-500/30"
+                      onLoadedMetadata={() => {
+                        if (baseVideoRef.current) {
+                          console.log('Base video loaded:', {
+                            duration: baseVideoRef.current.duration,
+                            videoWidth: baseVideoRef.current.videoWidth,
+                            videoHeight: baseVideoRef.current.videoHeight
+                          });
+                        }
+                      }}
                     />
                   </div>
                 )}
@@ -234,35 +422,64 @@ function App() {
                     onChange={handleHologramFileChange}
                     className="hidden"
                     id="hologram-upload"
+                    disabled={uploadingHologram}
                   />
                   <label
                     htmlFor="hologram-upload"
-                    className="flex items-center justify-center w-full h-32 border-2 border-dashed border-purple-500/50 rounded-lg hover:border-purple-400/80 cursor-pointer transition-colors bg-gray-800/30"
+                    className={`flex items-center justify-center w-full h-32 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
+                      uploadingHologram 
+                        ? 'border-yellow-500/50 bg-yellow-500/10' 
+                        : hologramFile 
+                          ? 'border-green-500/50 bg-green-500/10 hover:border-green-400/80' 
+                          : 'border-purple-500/50 bg-gray-800/30 hover:border-purple-400/80'
+                    }`}
                   >
                     <div className="text-center">
-                      <div className="text-4xl mb-2">✨</div>
+                      <div className="text-4xl mb-2">
+                        {uploadingHologram ? '⏳' : hologramFile ? '✅' : '✨'}
+                      </div>
                       <p className="text-gray-300">
-                        {hologramFile ? hologramFile.name : "Drop your hologram content here"}
+                        {uploadingHologram 
+                          ? 'Uploading hologram media...' 
+                          : hologramFile 
+                            ? hologramInfo?.filename || hologramFile.name
+                            : "Drop your hologram content here"
+                        }
                       </p>
-                      <p className="text-sm text-gray-500">Images or videos</p>
+                      <p className="text-sm text-gray-500">
+                        {uploadingHologram 
+                          ? 'Please wait...' 
+                          : hologramInfo 
+                            ? `${hologramInfo.size} - ${hologramInfo.type || 'Unknown type'}`
+                            : 'Images or videos (max 50MB)'
+                        }
+                      </p>
                     </div>
                   </label>
                 </div>
                 
-                {hologramFile && (
+                {hologramFile && !uploadingHologram && (
                   <div className="mt-3">
                     {hologramFile.type.startsWith('image/') ? (
                       <img
                         src={URL.createObjectURL(hologramFile)}
                         alt="Hologram preview"
-                        className="w-full max-h-40 object-contain rounded-lg bg-gray-900"
+                        className="w-full max-h-40 object-contain rounded-lg bg-gray-900 border border-purple-500/30"
                       />
                     ) : (
                       <video
                         ref={hologramPreviewRef}
-                        src={URL.createObjectURL(hologramFile)}
                         controls
-                        className="w-full max-h-40 rounded-lg"
+                        className="w-full max-h-40 rounded-lg border border-purple-500/30"
+                        onLoadedMetadata={() => {
+                          if (hologramPreviewRef.current) {
+                            console.log('Hologram video loaded:', {
+                              duration: hologramPreviewRef.current.duration,
+                              videoWidth: hologramPreviewRef.current.videoWidth,
+                              videoHeight: hologramPreviewRef.current.videoHeight
+                            });
+                          }
+                        }}
                       />
                     )}
                   </div>
@@ -396,10 +613,20 @@ function App() {
                       {status.status.toUpperCase()}
                     </span>
                   </div>
-                  {processing && (
-                    <div className="mt-2">
+                  <div className="mt-2 text-sm text-gray-400">
+                    {status.message}
+                  </div>
+                  {processing && status.progress > 0 && (
+                    <div className="mt-3">
+                      <div className="flex justify-between text-sm text-gray-400 mb-1">
+                        <span>Progress</span>
+                        <span>{status.progress.toFixed(1)}%</span>
+                      </div>
                       <div className="w-full bg-gray-600 rounded-full h-2">
-                        <div className="bg-cyan-500 h-2 rounded-full animate-pulse"></div>
+                        <div 
+                          className="bg-cyan-500 h-2 rounded-full transition-all duration-500"
+                          style={{ width: `${status.progress}%` }}
+                        ></div>
                       </div>
                     </div>
                   )}
@@ -410,7 +637,7 @@ function App() {
               <div className="space-y-3">
                 <button
                   onClick={processVideo}
-                  disabled={!baseVideoFile || !hologramFile || processing}
+                  disabled={!baseVideoFile || !hologramFile || processing || uploadingBase || uploadingHologram || !systemStatus?.ffmpeg_available}
                   className="w-full bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-bold py-3 px-6 rounded-lg disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed hover:from-cyan-600 hover:to-blue-700 transition-colors"
                 >
                   {processing ? (
@@ -434,8 +661,34 @@ function App() {
                     📥 Download Hologram Video
                   </button>
                 )}
+
+                {project && (
+                  <button
+                    onClick={resetProject}
+                    className="w-full bg-gradient-to-r from-gray-600 to-gray-700 text-white font-bold py-2 px-6 rounded-lg hover:from-gray-700 hover:to-gray-800 transition-colors text-sm"
+                  >
+                    🔄 Start New Project
+                  </button>
+                )}
               </div>
             </div>
+
+            {/* Project Info */}
+            {project && (
+              <div className="bg-gray-800/50 backdrop-blur-sm border border-cyan-500/30 rounded-xl p-6">
+                <h3 className="text-xl font-bold text-cyan-400 mb-3">📋 Project Details</h3>
+                <div className="space-y-2 text-sm text-gray-300">
+                  <p><span className="text-gray-400">Project ID:</span> {project.id}</p>
+                  <p><span className="text-gray-400">Created:</span> {new Date(project.created_at).toLocaleString()}</p>
+                  {baseVideoInfo && (
+                    <p><span className="text-gray-400">Base Video:</span> {baseVideoInfo.filename} ({baseVideoInfo.size})</p>
+                  )}
+                  {hologramInfo && (
+                    <p><span className="text-gray-400">Hologram Media:</span> {hologramInfo.filename} ({hologramInfo.size})</p>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Info Panel */}
             <div className="bg-gray-800/50 backdrop-blur-sm border border-cyan-500/30 rounded-xl p-6">

@@ -43,10 +43,18 @@ class HologramProject(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     base_video_path: Optional[str] = None
+    base_video_filename: Optional[str] = None
+    base_video_size: Optional[int] = None
     hologram_media_path: Optional[str] = None
+    hologram_media_filename: Optional[str] = None
+    hologram_media_size: Optional[int] = None
+    hologram_media_type: Optional[str] = None
     settings: dict = Field(default_factory=dict)
     status: str = "created"  # created, processing, completed, failed
     output_path: Optional[str] = None
+    output_size: Optional[int] = None
+    error_message: Optional[str] = None
+    processing_progress: float = 0.0
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -66,16 +74,31 @@ class ProcessingStatus(BaseModel):
     status: str
     progress: float = 0.0
     message: str = ""
+    error_message: Optional[str] = None
+
+class SystemStatus(BaseModel):
+    message: str
+    ffmpeg_available: bool
+    ffmpeg_version: Optional[str] = None
+    uploads_directory: str
+    processed_directory: str
+    total_projects: int = 0
 
 
 # Video processing functions
 def check_ffmpeg():
-    """Check if FFmpeg is installed"""
+    """Check if FFmpeg is installed and get version info"""
     try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
-        return result.returncode == 0
-    except FileNotFoundError:
-        return False
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            # Extract version from output
+            lines = result.stdout.split('\n')
+            version_line = next((line for line in lines if line.startswith('ffmpeg version')), '')
+            return True, version_line.split(' ')[2] if version_line else 'Unknown'
+        return False, None
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.error(f"FFmpeg check failed: {e}")
+        return False, None
 
 def get_video_info(video_path):
     """Get video information using FFprobe"""
@@ -84,13 +107,38 @@ def get_video_info(video_path):
         str(video_path)
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
             return json.loads(result.stdout)
+        logger.error(f"FFprobe failed: {result.stderr}")
         return None
     except Exception as e:
         logger.error(f"Error getting video info: {e}")
         return None
+
+def format_file_size(size_bytes):
+    """Format file size in human readable format"""
+    if size_bytes == 0:
+        return "0 B"
+    size_names = ["B", "KB", "MB", "GB"]
+    i = 0
+    while size_bytes >= 1024 and i < len(size_names) - 1:
+        size_bytes /= 1024
+        i += 1
+    return f"{size_bytes:.1f} {size_names[i]}"
+
+async def update_progress(project_id: str, progress: float, message: str):
+    """Update processing progress"""
+    await db.hologram_projects.update_one(
+        {"id": project_id},
+        {
+            "$set": {
+                "processing_progress": progress,
+                "updated_at": datetime.utcnow()
+            }
+        }
+    )
+    logger.info(f"Project {project_id}: {progress:.1f}% - {message}")
 
 async def process_hologram_video(project_id: str, base_video_path: str, hologram_media_path: str, settings: HologramSettings):
     """Process video with hologram effects using FFmpeg"""
@@ -98,11 +146,13 @@ async def process_hologram_video(project_id: str, base_video_path: str, hologram
         # Update project status
         await db.hologram_projects.update_one(
             {"id": project_id},
-            {"$set": {"status": "processing", "updated_at": datetime.utcnow()}}
+            {"$set": {"status": "processing", "processing_progress": 0.0, "updated_at": datetime.utcnow()}}
         )
         
         output_filename = f"hologram_{project_id}.mp4"
         output_path = PROCESSED_DIR / output_filename
+        
+        await update_progress(project_id, 10.0, "Analyzing input videos...")
         
         # Get video info
         base_video_info = get_video_info(base_video_path)
@@ -117,12 +167,16 @@ async def process_hologram_video(project_id: str, base_video_path: str, hologram
         base_width = int(video_stream['width'])
         base_height = int(video_stream['height'])
         
+        await update_progress(project_id, 25.0, "Calculating hologram dimensions...")
+        
         # Calculate hologram dimensions and position
         hologram_width = int(base_width * settings.hologram_size)
         hologram_height = int(base_height * settings.hologram_size)
         
         hologram_x = int((base_width - hologram_width) * settings.hologram_position_x)
         hologram_y = int((base_height - hologram_height) * settings.hologram_position_y)
+        
+        await update_progress(project_id, 40.0, "Building hologram effects pipeline...")
         
         # Create complex FFmpeg filter for hologram effect
         filter_complex = []
@@ -165,6 +219,8 @@ async def process_hologram_video(project_id: str, base_video_path: str, hologram
         # Overlay on base video
         filter_complex.append(f"[0:v][{last_filter}]overlay={hologram_x}:{hologram_y}:enable='gte(t,0)'[output]")
         
+        await update_progress(project_id, 60.0, "Starting video processing...")
+        
         # Build FFmpeg command
         cmd = [
             'ffmpeg', '-y',
@@ -182,6 +238,8 @@ async def process_hologram_video(project_id: str, base_video_path: str, hologram
         
         logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
         
+        await update_progress(project_id, 80.0, "Rendering hologram video...")
+        
         # Run FFmpeg
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         stdout, stderr = process.communicate()
@@ -190,6 +248,11 @@ async def process_hologram_video(project_id: str, base_video_path: str, hologram
             logger.error(f"FFmpeg error: {stderr}")
             raise Exception(f"Video processing failed: {stderr}")
         
+        await update_progress(project_id, 95.0, "Finalizing output...")
+        
+        # Get output file size
+        output_size = output_path.stat().st_size if output_path.exists() else 0
+        
         # Update project with success
         await db.hologram_projects.update_one(
             {"id": project_id},
@@ -197,31 +260,49 @@ async def process_hologram_video(project_id: str, base_video_path: str, hologram
                 "$set": {
                     "status": "completed",
                     "output_path": str(output_path),
+                    "output_size": output_size,
+                    "processing_progress": 100.0,
                     "updated_at": datetime.utcnow()
                 }
             }
         )
         
-        logger.info(f"Successfully processed hologram video: {output_path}")
+        logger.info(f"Successfully processed hologram video: {output_path} ({format_file_size(output_size)})")
         return str(output_path)
         
     except Exception as e:
         logger.error(f"Error processing hologram video: {e}")
         await db.hologram_projects.update_one(
             {"id": project_id},
-            {"$set": {"status": "failed", "updated_at": datetime.utcnow()}}
+            {
+                "$set": {
+                    "status": "failed",
+                    "error_message": str(e),
+                    "processing_progress": 0.0,
+                    "updated_at": datetime.utcnow()
+                }
+            }
         )
         raise
 
 
 # API Routes
-@api_router.get("/")
-async def root():
-    ffmpeg_available = check_ffmpeg()
-    return {
-        "message": "Hologram Video Compositor API",
-        "ffmpeg_available": ffmpeg_available
-    }
+@api_router.get("/", response_model=SystemStatus)
+async def get_system_status():
+    """Get system status including FFmpeg availability"""
+    ffmpeg_available, ffmpeg_version = check_ffmpeg()
+    
+    # Get total project count
+    total_projects = await db.hologram_projects.count_documents({})
+    
+    return SystemStatus(
+        message="Hologram Video Compositor API",
+        ffmpeg_available=ffmpeg_available,
+        ffmpeg_version=ffmpeg_version,
+        uploads_directory=str(UPLOADS_DIR),
+        processed_directory=str(PROCESSED_DIR),
+        total_projects=total_projects
+    )
 
 @api_router.post("/projects", response_model=HologramProject)
 async def create_project(name: str = Form(...)):
@@ -233,7 +314,7 @@ async def create_project(name: str = Form(...)):
 @api_router.get("/projects", response_model=List[HologramProject])
 async def get_projects():
     """Get all projects"""
-    projects = await db.hologram_projects.find().to_list(100)
+    projects = await db.hologram_projects.find().sort("created_at", -1).to_list(100)
     return [HologramProject(**project) for project in projects]
 
 @api_router.get("/projects/{project_id}", response_model=HologramProject)
@@ -252,24 +333,44 @@ async def upload_base_video(project_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=404, detail="Project not found")
     
     # Validate file type
-    if not file.content_type.startswith('video/'):
+    if not file.content_type or not file.content_type.startswith('video/'):
         raise HTTPException(status_code=400, detail="File must be a video")
+    
+    # Validate file size (max 100MB)
+    if file.size and file.size > 100 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Video file too large (max 100MB)")
     
     # Save file
     file_extension = Path(file.filename).suffix
     filename = f"base_{project_id}{file_extension}"
     file_path = UPLOADS_DIR / filename
     
+    # Write file in chunks
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        while chunk := await file.read(8192):  # Read in 8KB chunks
+            buffer.write(chunk)
+    
+    file_size = file_path.stat().st_size
     
     # Update project
     await db.hologram_projects.update_one(
         {"id": project_id},
-        {"$set": {"base_video_path": str(file_path), "updated_at": datetime.utcnow()}}
+        {
+            "$set": {
+                "base_video_path": str(file_path),
+                "base_video_filename": file.filename,
+                "base_video_size": file_size,
+                "updated_at": datetime.utcnow()
+            }
+        }
     )
     
-    return {"message": "Base video uploaded successfully", "filename": filename}
+    return {
+        "message": "Base video uploaded successfully",
+        "filename": file.filename,
+        "size": format_file_size(file_size),
+        "path": filename
+    }
 
 @api_router.post("/projects/{project_id}/upload-hologram-media")
 async def upload_hologram_media(project_id: str, file: UploadFile = File(...)):
@@ -279,24 +380,46 @@ async def upload_hologram_media(project_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=404, detail="Project not found")
     
     # Validate file type
-    if not (file.content_type.startswith('video/') or file.content_type.startswith('image/')):
+    if not file.content_type or not (file.content_type.startswith('video/') or file.content_type.startswith('image/')):
         raise HTTPException(status_code=400, detail="File must be a video or image")
+    
+    # Validate file size (max 50MB)
+    if file.size and file.size > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Media file too large (max 50MB)")
     
     # Save file
     file_extension = Path(file.filename).suffix
     filename = f"hologram_{project_id}{file_extension}"
     file_path = UPLOADS_DIR / filename
     
+    # Write file in chunks
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        while chunk := await file.read(8192):  # Read in 8KB chunks
+            buffer.write(chunk)
+    
+    file_size = file_path.stat().st_size
     
     # Update project
     await db.hologram_projects.update_one(
         {"id": project_id},
-        {"$set": {"hologram_media_path": str(file_path), "updated_at": datetime.utcnow()}}
+        {
+            "$set": {
+                "hologram_media_path": str(file_path),
+                "hologram_media_filename": file.filename,
+                "hologram_media_size": file_size,
+                "hologram_media_type": file.content_type,
+                "updated_at": datetime.utcnow()
+            }
+        }
     )
     
-    return {"message": "Hologram media uploaded successfully", "filename": filename}
+    return {
+        "message": "Hologram media uploaded successfully",
+        "filename": file.filename,
+        "size": format_file_size(file_size),
+        "type": file.content_type,
+        "path": filename
+    }
 
 @api_router.post("/projects/{project_id}/process")
 async def process_project(
@@ -312,7 +435,18 @@ async def process_project(
     project_obj = HologramProject(**project)
     
     if not project_obj.base_video_path or not project_obj.hologram_media_path:
-        raise HTTPException(status_code=400, detail="Both base video and hologram media must be uploaded")
+        raise HTTPException(
+            status_code=400,
+            detail="Both base video and hologram media must be uploaded before processing"
+        )
+    
+    if project_obj.status == "processing":
+        raise HTTPException(status_code=400, detail="Project is already being processed")
+    
+    # Check FFmpeg availability
+    ffmpeg_available, _ = check_ffmpeg()
+    if not ffmpeg_available:
+        raise HTTPException(status_code=503, detail="FFmpeg is not available. Cannot process video.")
     
     # Update project settings
     await db.hologram_projects.update_one(
@@ -329,7 +463,11 @@ async def process_project(
         settings
     )
     
-    return {"message": "Processing started", "project_id": project_id}
+    return {
+        "message": "Processing started",
+        "project_id": project_id,
+        "settings": settings.dict()
+    }
 
 @api_router.get("/projects/{project_id}/status", response_model=ProcessingStatus)
 async def get_processing_status(project_id: str):
@@ -339,11 +477,26 @@ async def get_processing_status(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
     
     project_obj = HologramProject(**project)
+    
+    # Determine message based on status
+    if project_obj.status == "created":
+        message = "Project created, ready for processing"
+    elif project_obj.status == "processing":
+        message = f"Processing... {project_obj.processing_progress:.1f}% complete"
+    elif project_obj.status == "completed":
+        output_size = format_file_size(project_obj.output_size) if project_obj.output_size else "Unknown"
+        message = f"Processing completed! Output file size: {output_size}"
+    elif project_obj.status == "failed":
+        message = f"Processing failed: {project_obj.error_message or 'Unknown error'}"
+    else:
+        message = f"Status: {project_obj.status}"
+    
     return ProcessingStatus(
         project_id=project_id,
         status=project_obj.status,
-        progress=100.0 if project_obj.status == "completed" else 0.0,
-        message=f"Status: {project_obj.status}"
+        progress=project_obj.processing_progress,
+        message=message,
+        error_message=project_obj.error_message
     )
 
 @api_router.get("/projects/{project_id}/download")
@@ -355,16 +508,26 @@ async def download_processed_video(project_id: str):
     
     project_obj = HologramProject(**project)
     
-    if project_obj.status != "completed" or not project_obj.output_path:
-        raise HTTPException(status_code=400, detail="Video not ready for download")
+    if project_obj.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Video is not ready for download. Current status: {project_obj.status}"
+        )
     
-    if not Path(project_obj.output_path).exists():
-        raise HTTPException(status_code=404, detail="Processed video file not found")
+    if not project_obj.output_path:
+        raise HTTPException(status_code=404, detail="Output file path not found")
+    
+    output_path = Path(project_obj.output_path)
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="Processed video file not found on disk")
     
     return FileResponse(
-        project_obj.output_path,
+        str(output_path),
         media_type='video/mp4',
-        filename=f"hologram_{project_id}.mp4"
+        filename=f"hologram_{project_obj.name.replace(' ', '_')}_{project_id[:8]}.mp4",
+        headers={
+            "Content-Disposition": f"attachment; filename=hologram_{project_obj.name.replace(' ', '_')}_{project_id[:8]}.mp4"
+        }
     )
 
 
